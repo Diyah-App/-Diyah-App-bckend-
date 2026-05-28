@@ -50,6 +50,10 @@ def log_to_file(message):
     except Exception as e:
         print(f"Logging error: {e}")
 
+def log_action(actor_id, message):
+    """Log an action performed by a user actor."""
+    log_to_file(f"Action by user {actor_id}: {message}")
+
 @api.before_request
 def check_app_token():
     log_to_file(f"Incoming Request: {request.method} {request.path}")
