@@ -4,6 +4,7 @@ import time
 import hashlib
 from collections import defaultdict
 from models import db, Member, Diyah, DiyahPayment, Notification, WalletTransaction
+from sqlalchemy import func, case
 from datetime import datetime
 from firebase_admin import messaging, remote_config
 
@@ -173,6 +174,13 @@ def get_wallet_status():
 
 @api.route('/api/wallet/transactions', methods=['GET'])
 def get_wallet_transactions():
+    try:
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 0))
+    except ValueError:
+        page = 1
+        limit = 0
+
     query_str = request.args.get('query', '').strip()
     
     tx_query = WalletTransaction.query.join(Member)
@@ -184,8 +192,23 @@ def get_wallet_transactions():
             (WalletTransaction.transaction_type.like(f"%{query_str}%"))
         )
         
-    transactions = tx_query.order_by(WalletTransaction.created_at.desc()).all()
-    return jsonify([tx.to_dict() for tx in transactions])
+    tx_query = tx_query.order_by(WalletTransaction.created_at.desc())
+
+    if limit > 0:
+        total = tx_query.count()
+        transactions = tx_query.limit(limit).offset((page - 1) * limit).all()
+        return jsonify({
+            "data": [tx.to_dict() for tx in transactions],
+            "has_more": (page * limit) < total,
+            "total": total
+        })
+    else:
+        transactions = tx_query.all()
+        return jsonify({
+            "data": [tx.to_dict() for tx in transactions],
+            "has_more": False,
+            "total": len(transactions)
+        })
 
 @api.route('/', methods=['GET'])
 def home():
@@ -365,14 +388,37 @@ def add_member():
 
 @api.route('/api/members', methods=['GET'])
 def get_members():
-    members = Member.query.filter(Member.role != 'owner').all()
-    def sort_key(m):
-        group_id = m.wajeeh_id if m.wajeeh_id else m.id
-        priority = 0 if m.is_wajeeh else 1
-        return (group_id, priority, m.full_name)
+    try:
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 0))
+    except ValueError:
+        page = 1
+        limit = 0
+
+    query = Member.query.filter(Member.role != 'owner')
     
-    sorted_members = sorted(members, key=sort_key)
-    return jsonify([m.to_dict() for m in sorted_members])
+    # Custom SQL sorting logic to group Wajeehs and their followers
+    group_id = func.coalesce(Member.wajeeh_id, Member.id)
+    priority = case((Member.is_wajeeh == True, 0), else_=1)
+    
+    query = query.order_by(group_id, priority, Member.full_name)
+
+    if limit > 0:
+        total = query.count()
+        members = query.limit(limit).offset((page - 1) * limit).all()
+        return jsonify({
+            "data": [m.to_dict() for m in members],
+            "has_more": (page * limit) < total,
+            "total": total
+        })
+    else:
+        # Backward compatibility / fetch all
+        members = query.all()
+        return jsonify({
+            "data": [m.to_dict() for m in members],
+            "has_more": False,
+            "total": len(members)
+        })
 
 @api.route('/api/members/<int:member_id>', methods=['PUT'])
 def update_member(member_id):
@@ -526,8 +572,30 @@ def add_diyah():
 
 @api.route('/api/diyahs', methods=['GET'])
 def get_diyahs():
-    diyahs = Diyah.query.order_by(Diyah.created_at.desc()).all()
-    return jsonify([d.to_dict() for d in diyahs])
+    try:
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 0))
+    except ValueError:
+        page = 1
+        limit = 0
+
+    query = Diyah.query.order_by(Diyah.created_at.desc())
+
+    if limit > 0:
+        total = query.count()
+        diyahs = query.limit(limit).offset((page - 1) * limit).all()
+        return jsonify({
+            "data": [d.to_dict() for d in diyahs],
+            "has_more": (page * limit) < total,
+            "total": total
+        })
+    else:
+        diyahs = query.all()
+        return jsonify({
+            "data": [d.to_dict() for d in diyahs],
+            "has_more": False,
+            "total": len(diyahs)
+        })
 
 @api.route('/api/diyahs/<int:diyah_id>', methods=['PUT'])
 def update_diyah(diyah_id):
