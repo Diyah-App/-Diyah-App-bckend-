@@ -173,9 +173,6 @@ def get_wallet_status():
         transaction_type='old_diyah_payment'
     ).scalar() or 0.0
     
-    total_balance += old_diyah_payments_sum
-    total_positive_funds += old_diyah_payments_sum
-    
     return jsonify({
         "total_balance": round(total_balance, 2),
         "total_members": total_members,
