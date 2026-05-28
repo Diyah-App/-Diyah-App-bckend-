@@ -25,6 +25,34 @@ def migrate():
     except sqlite3.OperationalError:
         print("'caused_by_id' column already exists.")
 
+    # Add owner_percentage column to diyah table
+    try:
+        cursor.execute("ALTER TABLE diyah ADD COLUMN owner_percentage FLOAT")
+        print("Added 'owner_percentage' column to 'diyah' table.")
+    except sqlite3.OperationalError:
+        print("'owner_percentage' column already exists.")
+
+    # Add amount column to diyah_payment table
+    try:
+        cursor.execute("ALTER TABLE diyah_payment ADD COLUMN amount FLOAT")
+        print("Added 'amount' column to 'diyah_payment' table.")
+    except sqlite3.OperationalError:
+        print("'amount' column already exists.")
+
+    # Add rounded_share column to diyah table
+    try:
+        cursor.execute("ALTER TABLE diyah ADD COLUMN rounded_share FLOAT")
+        print("Added 'rounded_share' column to 'diyah' table.")
+    except sqlite3.OperationalError:
+        print("'rounded_share' column already exists.")
+        
+    # Add paid_from_old_diyah_fund column to diyah table
+    try:
+        cursor.execute("ALTER TABLE diyah ADD COLUMN paid_from_old_diyah_fund FLOAT DEFAULT 0.0")
+        print("Added 'paid_from_old_diyah_fund' column to 'diyah' table.")
+    except sqlite3.OperationalError:
+        print("'paid_from_old_diyah_fund' column already exists.")
+
     conn.commit()
     conn.close()
     print("Migration complete.")
