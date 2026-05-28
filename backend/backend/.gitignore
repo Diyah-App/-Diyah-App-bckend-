@@ -1,0 +1,17 @@
+firebase-key.json.json
+app.db
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+# Sensitive logs - must never be committed
+request_logs.txt
+*.log
+# Debug/inspection scripts
+inspect_db*.py
+get_diyah_json.py
+inspect_db_data.py
+rc_test.py

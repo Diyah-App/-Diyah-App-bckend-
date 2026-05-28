@@ -60,9 +60,7 @@ class Diyah(db.Model):
 
     total_members_count = db.Column(db.Integer, default=0)
     share_per_member = db.Column(db.Float, default=0.0)
-    rounded_share = db.Column(db.Float, nullable=True)
     owner_percentage = db.Column(db.Float, nullable=True) # Percentage owner pays (e.g., 35.0)
-    paid_from_old_diyah_fund = db.Column(db.Float, default=0.0)
 
     caused_by = db.relationship('Member', foreign_keys=[caused_by_id], backref='diyahs_caused')
     payments = db.relationship('DiyahPayment', backref='diyah', cascade='all, delete-orphan')
@@ -81,9 +79,7 @@ class Diyah(db.Model):
             "caused_by_name": self.caused_by.full_name if self.caused_by else None,
             "total_members_count": self.total_members_count,
             "share_per_member": self.share_per_member,
-            "rounded_share": self.rounded_share,
-            "owner_percentage": self.owner_percentage,
-            "paid_from_old_diyah_fund": self.paid_from_old_diyah_fund
+            "owner_percentage": self.owner_percentage
         }
 
 class DiyahPayment(db.Model):

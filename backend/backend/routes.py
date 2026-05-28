@@ -162,31 +162,23 @@ def recalculate_member_balance(member):
 @api.route('/api/wallet/status', methods=['GET'])
 def get_wallet_status():
     members = Member.query.filter(Member.role != 'owner').all()
-    current_fund_balance = sum(m.balance for m in members if m.balance > 0)
+    total_balance = sum(m.balance for m in members)
     total_members = len(members)
     
-    # Old diyahs fund logic
-    old_payments = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
+    total_positive_funds = sum(m.balance for m in members if m.balance > 0)
+    total_deficit = sum(abs(m.balance) for m in members if m.balance < 0)
+    
+    # Old diyahs fund (revenue collected from new members for old diyahs)
+    old_diyah_payments_sum = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
         transaction_type='old_diyah_payment'
     ).scalar() or 0.0
     
-    old_used = db.session.query(db.func.sum(Diyah.paid_from_old_diyah_fund)).scalar() or 0.0
-    available_old_diyah_cash = max(0.0, old_payments - old_used)
-    
-    old_shares = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
-        transaction_type='old_diyah_share'
-    ).scalar() or 0.0
-    
-    old_diyahs_debt = old_shares + old_payments
-    
-    total_fund_balance = current_fund_balance + available_old_diyah_cash
-    
     return jsonify({
-        "total_balance": round(total_fund_balance, 2),
-        "current_fund_balance": round(current_fund_balance, 2),
-        "available_old_diyah_cash": round(available_old_diyah_cash, 2),
-        "old_diyahs_debt": round(old_diyahs_debt, 2),
-        "total_members": total_members
+        "total_balance": round(total_balance, 2),
+        "total_members": total_members,
+        "total_positive_funds": round(total_positive_funds, 2),
+        "total_deficit": round(total_deficit, 2),
+        "old_diyahs_fund": round(old_diyah_payments_sum, 2)
     })
 
 
@@ -427,17 +419,15 @@ def add_member():
         # Add old diyahs to the new member
         old_diyahs = Diyah.query.filter(Diyah.created_at < new_member.created_at).all()
         for d in old_diyahs:
-            share_to_charge = d.rounded_share if d.rounded_share is not None else d.share_per_member
-            if share_to_charge > 0:
-                tx = WalletTransaction(
-                    member_id=new_member.id,
-                    diyah_id=d.id,
-                    amount=-share_to_charge,
-                    transaction_type='old_diyah_share',
-                    description=f"مطلوب دية قديمة: {d.title}",
-                    created_at=new_member.created_at
-                )
-                db.session.add(tx)
+            tx = WalletTransaction(
+                member_id=new_member.id,
+                diyah_id=d.id,
+                amount=-d.share_per_member,
+                transaction_type='old_diyah_share',
+                description=f"مطلوب دية قديمة: {d.title}",
+                created_at=new_member.created_at
+            )
+            db.session.add(tx)
 
         log_action(actor_id, f"إضافة عضو جديد: {new_member.full_name}")
         db.session.commit()
@@ -574,34 +564,17 @@ def add_diyah():
         total_members = Member.query.filter(Member.role != 'owner').count()
         amount = float(data.get('amount'))
         owner_percentage = data.get('owner_percentage')
-        rounded_share = data.get('rounded_share')
-        if rounded_share is not None:
-            rounded_share = float(rounded_share)
-
-        owner_amount = 0.0
-        if owner_percentage is not None:
-            owner_percentage = float(owner_percentage)
-            owner_amount = amount * (owner_percentage / 100.0)
-
-        remaining_amount = amount - owner_amount
-
-        # Calculate available old diyahs cash
-        old_payments = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
-            transaction_type='old_diyah_payment'
-        ).scalar() or 0.0
-        old_used = db.session.query(db.func.sum(Diyah.paid_from_old_diyah_fund)).scalar() or 0.0
-        available_old_cash = max(0.0, old_payments - old_used)
-
-        paid_from_old = min(remaining_amount, available_old_cash)
-        final_remaining = remaining_amount - paid_from_old
         
-        share = 0.0
+        share = 0
         if total_members > 0:
             if owner_percentage is not None:
+                owner_percentage = float(owner_percentage)
                 if total_members > 1:
-                    share = final_remaining / (total_members - 1)
+                    share = (amount * (1 - owner_percentage / 100)) / (total_members - 1)
+                else:
+                    share = 0
             else:
-                share = final_remaining / total_members
+                share = amount / total_members
 
         diyah_created_at = datetime.utcnow()
         new_diyah = Diyah(
@@ -614,9 +587,7 @@ def add_diyah():
             is_fully_paid=data.get('is_fully_paid', False),
             total_members_count=total_members,
             share_per_member=round(share, 2),
-            rounded_share=rounded_share,
             owner_percentage=owner_percentage,
-            paid_from_old_diyah_fund=paid_from_old,
             created_at=diyah_created_at
         )
         db.session.add(new_diyah)
@@ -630,54 +601,16 @@ def add_diyah():
             else:
                 m_share = new_diyah.share_per_member
             
-            if m_share <= 0:
-                continue
-                
-            deduct_amount = 0.0
-            if m.balance >= m_share:
-                deduct_amount = m_share
-            elif m.balance > 0:
-                deduct_amount = m.balance
-                
-            if deduct_amount > 0:
-                tx = WalletTransaction(
-                    member_id=m.id,
-                    diyah_id=new_diyah.id,
-                    amount=-deduct_amount,
-                    transaction_type='diyah_share',
-                    description=f"خصم تلقائي لحصة الدية: {new_diyah.title}",
-                    created_at=diyah_created_at
-                )
-                db.session.add(tx)
-                m.balance = round(m.balance - deduct_amount, 2)
-                
-                payment = DiyahPayment(
-                    diyah_id=new_diyah.id,
-                    member_id=m.id,
-                    amount=deduct_amount
-                )
-                db.session.add(payment)
-
-        # ── Auto-mark as fully paid if all shares covered from balances ──────
-        # Re-check each eligible member's net position after the deductions above
-        all_covered = True
-        for m in eligible_members:
-            if new_diyah.caused_by_id == m.id and new_diyah.owner_percentage is not None:
-                m_share = new_diyah.amount * (new_diyah.owner_percentage / 100.0)
-            else:
-                m_share = new_diyah.share_per_member
-            if m_share <= 0:
-                continue
-            # How much cash was recorded for this member in the new payments above?
-            cash_paid = db.session.query(db.func.sum(DiyahPayment.amount)).filter_by(
-                diyah_id=new_diyah.id, member_id=m.id
-            ).scalar() or 0.0
-            if cash_paid < m_share:
-                all_covered = False
-                break
-
-        if all_covered:
-            new_diyah.is_fully_paid = True
+            tx = WalletTransaction(
+                member_id=m.id,
+                diyah_id=new_diyah.id,
+                amount=-m_share,
+                transaction_type='diyah_share',
+                description=f"خصم حصة دية: {new_diyah.title}",
+                created_at=diyah_created_at
+            )
+            db.session.add(tx)
+            m.balance = round(m.balance - m_share, 2)
 
         log_action(actor_id, f"إضافة دية جديدة: {new_diyah.title}")
         db.session.commit()
@@ -837,36 +770,27 @@ def update_diyah_payments(diyah_id):
     data = request.json
     actor_id = request.headers.get('X-User-Id')
     payments_data = data.get('payments', []) # Expect list of {member_id, amount}
-    removed_ids = data.get('removed_member_ids', [])  # Members whose payment was removed
     
     # Backward compatibility for old client if needed (though we control it)
     if not payments_data and 'paid_member_ids' in data:
         payments_data = [{'member_id': m_id, 'amount': None} for m_id in data['paid_member_ids']]
 
     try:
+        # Revert/delete existing cash_payment transactions for this diyah
+        old_payments = DiyahPayment.query.filter_by(diyah_id=diyah_id).all()
+        affected_member_ids = set(p.member_id for p in old_payments)
+        
+        DiyahPayment.query.filter_by(diyah_id=diyah_id).delete()
+        WalletTransaction.query.filter(
+            WalletTransaction.diyah_id == diyah_id,
+            WalletTransaction.transaction_type.in_(['cash_payment', 'old_diyah_payment'])
+        ).delete()
+        db.session.flush()
+
         diyah = db.session.get(Diyah, diyah_id)
         if not diyah:
             return jsonify({"error": "الدية غير موجودة"}), 404
 
-        affected_member_ids = set()  # FIX: initialize the set
-
-        # ── Handle removed payments (toggle turned OFF) ───────────────────────
-        for m_id in removed_ids:
-            affected_member_ids.add(m_id)
-            payment_record = DiyahPayment.query.filter_by(diyah_id=diyah_id, member_id=m_id).first()
-            if payment_record:
-                old_amount = payment_record.amount or 0.0
-                # Reverse all cash_payment and diyah_share transactions for this member+diyah
-                old_txs = WalletTransaction.query.filter(
-                    WalletTransaction.diyah_id == diyah_id,
-                    WalletTransaction.member_id == m_id,
-                    WalletTransaction.transaction_type.in_(['cash_payment', 'diyah_share', 'old_diyah_payment'])
-                ).all()
-                for tx in old_txs:
-                    db.session.delete(tx)
-                db.session.delete(payment_record)
-
-        # ── Handle new/updated payments ────────────────────────────────────────
         for p in payments_data:
             m_id = p.get('member_id')
             if m_id is None:
@@ -874,54 +798,48 @@ def update_diyah_payments(diyah_id):
             affected_member_ids.add(m_id)
             
             p_amount = p.get('amount')
+            # Validate amount: must be a number if provided
             if p_amount is not None:
                 try:
                     p_amount = float(p_amount)
                 except (TypeError, ValueError):
                     return jsonify({"error": f"قيمة الدفع غير صالحة للعضو {m_id}"}), 400
+
+            payment = DiyahPayment(
+                diyah_id=diyah_id, 
+                member_id=m_id,
+                amount=p_amount
+            )
+            db.session.add(payment)
+            
+            # Determine cash amount
+            if p_amount is not None:
+                cash_amount = p_amount
             else:
                 if diyah.caused_by_id == m_id and diyah.owner_percentage is not None:
-                    p_amount = diyah.amount * (diyah.owner_percentage / 100.0)
+                    cash_amount = diyah.amount * (diyah.owner_percentage / 100.0)
                 else:
-                    p_amount = diyah.rounded_share if diyah.rounded_share is not None else diyah.share_per_member
+                    cash_amount = diyah.share_per_member
+                    
+            # Determine transaction type based on when the member was created
+            member_obj = db.session.get(Member, m_id)
+            tx_type = 'cash_payment'
+            if member_obj and diyah.created_at < member_obj.created_at:
+                tx_type = 'old_diyah_payment'
+                desc = f"تسديد دية قديمة: {diyah.title}"
+            else:
+                desc = f"تسديد نقدي لدية: {diyah.title}"
 
-            payment_record = DiyahPayment.query.filter_by(diyah_id=diyah_id, member_id=m_id).first()
-            old_amount = payment_record.amount if payment_record else 0.0
+            tx = WalletTransaction(
+                member_id=m_id,
+                diyah_id=diyah_id,
+                amount=cash_amount,
+                transaction_type=tx_type,
+                description=desc,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(tx)
             
-            diff = p_amount - old_amount
-            
-            if diff != 0:
-                if payment_record:
-                    payment_record.amount = p_amount
-                else:
-                    payment_record = DiyahPayment(diyah_id=diyah_id, member_id=m_id, amount=p_amount)
-                    db.session.add(payment_record)
-                
-                member_obj = db.session.get(Member, m_id)
-                is_old_diyah = member_obj and diyah.created_at < member_obj.created_at
-                
-                if is_old_diyah:
-                    required_amount = diyah.rounded_share if diyah.rounded_share is not None else diyah.share_per_member
-                    current_old_payment = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
-                        member_id=m_id, diyah_id=diyah_id, transaction_type='old_diyah_payment'
-                    ).scalar() or 0.0
-                    
-                    allowed_old_diff = min(diff, required_amount - current_old_payment)
-                    excess = diff - allowed_old_diff
-                    
-                    if allowed_old_diff != 0:
-                        tx_old = WalletTransaction(member_id=m_id, diyah_id=diyah_id, amount=allowed_old_diff, transaction_type='old_diyah_payment', description=f"تسديد دية قديمة: {diyah.title}", created_at=datetime.utcnow())
-                        db.session.add(tx_old)
-                    if excess != 0:
-                        tx_cash = WalletTransaction(member_id=m_id, diyah_id=diyah_id, amount=excess, transaction_type='cash_payment', description=f"فائض تسديد دية قديمة: {diyah.title}", created_at=datetime.utcnow())
-                        db.session.add(tx_cash)
-                else:
-                    tx_cash = WalletTransaction(member_id=m_id, diyah_id=diyah_id, amount=diff, transaction_type='cash_payment', description=f"تسديد نقدي لدية: {diyah.title}", created_at=datetime.utcnow())
-                    db.session.add(tx_cash)
-                    
-                    tx_share = WalletTransaction(member_id=m_id, diyah_id=diyah_id, amount=-diff, transaction_type='diyah_share', description=f"تسوية ذمة الدية: {diyah.title}", created_at=datetime.utcnow())
-                    db.session.add(tx_share)
-                    
         db.session.flush()
         
         # Recalculate balances
@@ -963,7 +881,7 @@ def pay_old_diyahs(member_id):
             if existing_payment:
                 continue
 
-            share = diyah.rounded_share if diyah.rounded_share is not None else diyah.share_per_member
+            share = diyah.share_per_member
             
             # Create payment record
             payment = DiyahPayment(

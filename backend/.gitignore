@@ -1,17 +1,34 @@
-firebase-key.json.json
-app.db
-__pycache__/
-*.pyc
-.venv/
-venv/
-env/
-.idea/
-.vscode/
+# Ignore completely in the backend repo
+frontend/
+الصور/
+
+# Python related
+backend/__pycache__/
+backend/*.py[cod]
+backend/*$py.class
+backend/.venv
+backend/venv/
+backend/env/
+backend/*.db
+backend/*.sqlite3
+backend/firebase-key.json.json
+backend/app.db
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
+backend/venv/
+backend/env/
+backend/.idea/
+backend/.vscode/
 # Sensitive logs - must never be committed
-request_logs.txt
-*.log
+backend/request_logs.txt
+backend/*.log
 # Debug/inspection scripts
-inspect_db*.py
-get_diyah_json.py
-inspect_db_data.py
-rc_test.py
+backend/inspect_db*.py
+backend/get_diyah_json.py
+backend/inspect_db_data.py
+backend/rc_test.py
+
+# OS related
+.DS_Store
+Thumbs.db
