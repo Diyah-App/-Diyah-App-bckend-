@@ -152,7 +152,10 @@ def recalculate_member_balance(member):
     if member.role == 'owner':
         member.balance = 0.0
         return 0.0
-    tx_sum = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(member_id=member.id).scalar() or 0.0
+    tx_sum = db.session.query(db.func.sum(WalletTransaction.amount)).filter(
+        WalletTransaction.member_id == member.id,
+        WalletTransaction.transaction_type.in_(['diyah_share', 'cash_payment', 'admin_adjustment'])
+    ).scalar() or 0.0
     member.balance = round(tx_sum, 2)
     return member.balance
 
@@ -165,12 +168,22 @@ def get_wallet_status():
     total_positive_funds = sum(m.balance for m in members if m.balance > 0)
     total_deficit = sum(abs(m.balance) for m in members if m.balance < 0)
     
+    # Old diyahs fund (revenue collected from new members for old diyahs)
+    old_diyah_payments_sum = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(
+        transaction_type='old_diyah_payment'
+    ).scalar() or 0.0
+    
+    total_balance += old_diyah_payments_sum
+    total_positive_funds += old_diyah_payments_sum
+    
     return jsonify({
         "total_balance": round(total_balance, 2),
         "total_members": total_members,
         "total_positive_funds": round(total_positive_funds, 2),
-        "total_deficit": round(total_deficit, 2)
+        "total_deficit": round(total_deficit, 2),
+        "old_diyahs_fund": round(old_diyah_payments_sum, 2)
     })
+
 
 @api.route('/api/wallet/transactions', methods=['GET'])
 def get_wallet_transactions():
@@ -353,12 +366,37 @@ def change_role(member_id):
 
 @api.route('/api/notifications', methods=['GET'])
 def get_notifications():
+    try:
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 0))
+    except ValueError:
+        page = 1
+        limit = 0
+
     user_id = request.args.get('user_id')
+    
     if user_id:
-        notifs = Notification.query.filter((Notification.target_user_id == user_id) | (Notification.target_user_id == None)).order_by(Notification.created_at.desc()).all()
+        query = Notification.query.filter((Notification.target_user_id == user_id) | (Notification.target_user_id == None))
     else:
-        notifs = Notification.query.filter_by(target_user_id=None).order_by(Notification.created_at.desc()).all()
-    return jsonify([n.to_dict() for n in notifs])
+        query = Notification.query.filter_by(target_user_id=None)
+        
+    query = query.order_by(Notification.created_at.desc())
+    
+    if limit > 0:
+        total = query.count()
+        notifs = query.limit(limit).offset((page - 1) * limit).all()
+        return jsonify({
+            "data": [n.to_dict() for n in notifs],
+            "has_more": (page * limit) < total,
+            "total": total
+        })
+    else:
+        notifs = query.all()
+        return jsonify({
+            "data": [n.to_dict() for n in notifs],
+            "has_more": False,
+            "total": len(notifs)
+        })
 
 # --- Member Endpoints ---
 
@@ -379,6 +417,21 @@ def add_member():
         if is_wajeeh and data.get('password'):
             new_member.set_password(data.get('password'))
         db.session.add(new_member)
+        db.session.flush() # Get new_member.id and created_at
+        
+        # Add old diyahs to the new member
+        old_diyahs = Diyah.query.filter(Diyah.created_at < new_member.created_at).all()
+        for d in old_diyahs:
+            tx = WalletTransaction(
+                member_id=new_member.id,
+                diyah_id=d.id,
+                amount=-d.share_per_member,
+                transaction_type='old_diyah_share',
+                description=f"مطلوب دية قديمة: {d.title}",
+                created_at=new_member.created_at
+            )
+            db.session.add(tx)
+
         log_action(actor_id, f"إضافة عضو جديد: {new_member.full_name}")
         db.session.commit()
         return jsonify({"message": "Member added successfully", "member": new_member.to_dict()}), 201
@@ -706,9 +759,8 @@ def get_diyah_payments(diyah_id):
     diyah = Diyah.query.get_or_404(diyah_id)
     payments = DiyahPayment.query.filter_by(diyah_id=diyah_id).all()
     
-    # Eligible members = those created before or at the same time as the diyah
-    # We exclude the owner as requested
-    eligible_members = Member.query.filter(Member.created_at <= diyah.created_at, Member.role != 'owner').all()
+    # All members are now eligible for all diyahs (new members pay old diyahs)
+    eligible_members = Member.query.filter(Member.role != 'owner').all()
     eligible_member_ids = [m.id for m in eligible_members]
     
     return jsonify({
@@ -732,7 +784,10 @@ def update_diyah_payments(diyah_id):
         affected_member_ids = set(p.member_id for p in old_payments)
         
         DiyahPayment.query.filter_by(diyah_id=diyah_id).delete()
-        WalletTransaction.query.filter_by(diyah_id=diyah_id, transaction_type='cash_payment').delete()
+        WalletTransaction.query.filter(
+            WalletTransaction.diyah_id == diyah_id,
+            WalletTransaction.transaction_type.in_(['cash_payment', 'old_diyah_payment'])
+        ).delete()
         db.session.flush()
 
         diyah = db.session.get(Diyah, diyah_id)
@@ -769,12 +824,21 @@ def update_diyah_payments(diyah_id):
                 else:
                     cash_amount = diyah.share_per_member
                     
+            # Determine transaction type based on when the member was created
+            member_obj = db.session.get(Member, m_id)
+            tx_type = 'cash_payment'
+            if member_obj and diyah.created_at < member_obj.created_at:
+                tx_type = 'old_diyah_payment'
+                desc = f"تسديد دية قديمة: {diyah.title}"
+            else:
+                desc = f"تسديد نقدي لدية: {diyah.title}"
+
             tx = WalletTransaction(
                 member_id=m_id,
                 diyah_id=diyah_id,
                 amount=cash_amount,
-                transaction_type='cash_payment',
-                description=f"تسديد نقدي لدية: {diyah.title}",
+                transaction_type=tx_type,
+                description=desc,
                 created_at=datetime.utcnow()
             )
             db.session.add(tx)
@@ -794,6 +858,63 @@ def update_diyah_payments(diyah_id):
     except Exception as e:
         db.session.rollback()
         log_to_file(f"Error updating payments for diyah {diyah_id}: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+
+@api.route('/api/members/<int:member_id>/pay_old_diyahs', methods=['POST'])
+def pay_old_diyahs(member_id):
+    data = request.json
+    actor_id = request.headers.get('X-User-Id')
+    diyah_ids = data.get('diyah_ids', [])
+    
+    if not diyah_ids:
+        return jsonify({"error": "لم يتم تحديد ديات للدفع"}), 400
+
+    try:
+        member = db.session.get(Member, member_id)
+        if not member:
+            return jsonify({"error": "العضو غير موجود"}), 404
+
+        for diyah_id in diyah_ids:
+            diyah = db.session.get(Diyah, diyah_id)
+            if not diyah:
+                continue
+                
+            # Check if already paid
+            existing_payment = DiyahPayment.query.filter_by(diyah_id=diyah_id, member_id=member_id).first()
+            if existing_payment:
+                continue
+
+            share = diyah.share_per_member
+            
+            # Create payment record
+            payment = DiyahPayment(
+                diyah_id=diyah_id,
+                member_id=member_id,
+                amount=share
+            )
+            db.session.add(payment)
+            
+            # Create old_diyah_payment transaction
+            tx = WalletTransaction(
+                member_id=member_id,
+                diyah_id=diyah_id,
+                amount=share,
+                transaction_type='old_diyah_payment',
+                description=f"تسديد دية قديمة: {diyah.title}",
+                created_at=datetime.utcnow()
+            )
+            db.session.add(tx)
+            
+        db.session.flush()
+        
+        # Recalculate balance for the member
+        recalculate_member_balance(member)
+        
+        log_action(actor_id, f"دفع ديات قديمة للعضو: {member.full_name}")
+        db.session.commit()
+        return jsonify({"message": "تم الدفع بنجاح"})
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 400
 
 @api.route('/api/members/<int:member_id>/history', methods=['GET'])
@@ -822,7 +943,12 @@ def get_member_history(member_id):
         d_dict['member_share'] = round(share, 2)
         
         if not is_liable:
-            d_dict['member_payment'] = 0.0
+            if d.id in payments:
+                p = payments[d.id]
+                p_amount = p.amount if p.amount is not None else share
+                d_dict['member_payment'] = round(p_amount, 2)
+            else:
+                d_dict['member_payment'] = 0.0
             not_liable.append(d_dict)
             continue
             
