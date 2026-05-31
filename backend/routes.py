@@ -126,27 +126,57 @@ def update_remote_config():
         print(f"Error updating remote config: {e}")
         return jsonify({'error': str(e)}), 500
 
-def send_push_notification(title, body, target_user_id=None):
+def broadcast_notification(title, body, notif_type='general', entity_id=None, target_user_id=None):
+    """
+    Save a notification to DB and send FCM push to all relevant members.
+    - target_user_id=None means broadcast to ALL members.
+    - notif_type: 'member', 'diyah', 'general'
+    - entity_id: ID of member or diyah for deep navigation on tap
+    """
     try:
+        notif = Notification(
+            title=title,
+            message=body,
+            type=notif_type,
+            entity_id=entity_id,
+            target_user_id=target_user_id
+        )
+        db.session.add(notif)
+        db.session.flush()  # persist without committing yet
+    except Exception as e:
+        print(f"Failed to save notification to DB: {e}")
+
+    # Send FCM push notification
+    try:
+        data_payload = {
+            'type': notif_type,
+            'entity_id': str(entity_id) if entity_id else '',
+        }
         if target_user_id:
             user = Member.query.get(target_user_id)
             if user and user.fcm_token:
                 message = messaging.Message(
                     notification=messaging.Notification(title=title, body=body),
+                    data=data_payload,
                     token=user.fcm_token,
                 )
                 messaging.send(message)
         else:
-            users = Member.query.filter(Member.fcm_token != None).all()
+            users = Member.query.filter(Member.fcm_token != None, Member.fcm_token != '').all()
             tokens = [u.fcm_token for u in users]
             if tokens:
-                message = messaging.MulticastMessage(
-                    notification=messaging.Notification(title=title, body=body),
-                    tokens=tokens,
-                )
-                messaging.send_each_for_multicast(message)
+                # FCM multicast max 500 tokens per call
+                for i in range(0, len(tokens), 500):
+                    batch = tokens[i:i+500]
+                    msg = messaging.MulticastMessage(
+                        notification=messaging.Notification(title=title, body=body),
+                        data=data_payload,
+                        tokens=batch,
+                    )
+                    messaging.send_each_for_multicast(msg)
     except Exception as e:
-        print(f"Failed to send push notification: {e}")
+        print(f"Failed to send FCM push notification: {e}")
+
 
 def recalculate_member_balance(member):
     if member.role == 'owner':
@@ -360,13 +390,16 @@ def change_role(member_id):
     member.role = new_role
     if new_role == 'wajeeh':
         member.is_wajeeh = True
-        
+
+    role_labels = {'owner': 'مالك', 'sheikh': 'شيخ', 'admin': 'مشرف', 'wajeeh': 'وجيه', 'member': 'عضو عادي'}
+    role_label = role_labels.get(new_role, new_role)
+    broadcast_notification(
+        title='⬆️ تغيير الصلاحية',
+        body=f"تم تغيير رتبة {member.full_name} إلى ({role_label})",
+        notif_type='member',
+        entity_id=member.id
+    )
     db.session.commit()
-    
-    notif = Notification(message=f"تم تغيير رتبتك إلى {new_role}", target_user_id=member.id)
-    db.session.add(notif)
-    db.session.commit()
-    
     return jsonify({"message": "Role updated successfully", "member": member.to_dict()})
 
 @api.route('/api/notifications', methods=['GET'])
@@ -440,6 +473,12 @@ def add_member():
                 db.session.add(tx)
 
         log_action(actor_id, f"إضافة عضو جديد: {new_member.full_name}")
+        broadcast_notification(
+            title='➕ عضو جديد',
+            body=f"تمت إضافة العضو {new_member.full_name} إلى قائمة الأعضاء",
+            notif_type='member',
+            entity_id=new_member.id
+        )
         db.session.commit()
         return jsonify({"message": "Member added successfully", "member": new_member.to_dict()}), 201
     except Exception as e:
@@ -527,6 +566,12 @@ def update_member(member_id):
             member.username = data.get('username')
             
         log_action(actor_id, f"تعديل بيانات: {member.full_name}")
+        broadcast_notification(
+            title='✏️ تعديل بيانات عضو',
+            body=f"تم تعديل بيانات العضو {member.full_name}",
+            notif_type='member',
+            entity_id=member.id
+        )
         db.session.commit()
         return jsonify({"message": "Member updated successfully", "member": member.to_dict()})
     except Exception as e:
@@ -543,6 +588,11 @@ def delete_member(member_id):
             Member.query.filter_by(wajeeh_id=member.id).update({"wajeeh_id": None})
         db.session.delete(member)
         log_action(actor_id, f"حذف: {name}")
+        broadcast_notification(
+            title='🗑️ حذف عضو',
+            body=f"تم حذف العضو {name} من قائمة الأعضاء",
+            notif_type='general'
+        )
         db.session.commit()
         return jsonify({"message": "Member deleted successfully"})
     except Exception as e:
@@ -680,8 +730,13 @@ def add_diyah():
             new_diyah.is_fully_paid = True
 
         log_action(actor_id, f"إضافة دية جديدة: {new_diyah.title}")
+        broadcast_notification(
+            title='⚔️ دية جديدة',
+            body=f"تمت إضافة دية: {new_diyah.title} \u2022 المبلغ: {new_diyah.amount:,.0f} د.ع \u2022 الحصة: {new_diyah.share_per_member:,.2f} د.ع",
+            notif_type='diyah',
+            entity_id=new_diyah.id
+        )
         db.session.commit()
-        send_push_notification("دية جديدة تمت إضافتها", f"تم إضافة دية: {new_diyah.title} بمبلغ {new_diyah.amount}")
         return jsonify({"message": "Diyah added successfully", "diyah": new_diyah.to_dict()}), 201
     except Exception as e:
         db.session.rollback()
@@ -780,6 +835,13 @@ def update_diyah(diyah_id):
                 recalculate_member_balance(m)
             
         log_action(actor_id, f"تعديل دية: {diyah.title}")
+        is_finished_str = ' • (تم إغلاقها)' if diyah.is_finished else ''
+        broadcast_notification(
+            title='✏️ تعديل دية',
+            body=f"تم تعديل بيانات الدية: {diyah.title}{is_finished_str}",
+            notif_type='diyah',
+            entity_id=diyah.id
+        )
         db.session.commit()
         return jsonify({"message": "Diyah updated successfully", "diyah": diyah.to_dict()})
     except Exception as e:
@@ -810,6 +872,11 @@ def delete_diyah(diyah_id):
                 recalculate_member_balance(m)
 
         log_action(actor_id, f"حذف دية: {title}")
+        broadcast_notification(
+            title='🗑️ حذف دية',
+            body=f"تم حذف الدية: {title} من سجل الديات",
+            notif_type='general'
+        )
         db.session.commit()
         return jsonify({"message": "Diyah deleted successfully"})
     except Exception as e:
@@ -931,7 +998,31 @@ def update_diyah_payments(diyah_id):
                 recalculate_member_balance(m)
 
         log_action(actor_id, f"تحديث مدفوعات الدية: {diyah.title}")
-            
+
+        # Build notification body based on what happened
+        paid_names = []
+        removed_names = []
+        for m_id in affected_member_ids:
+            m_obj = db.session.get(Member, m_id)
+            if m_obj:
+                if m_id in [p.get('member_id') for p in (data.get('payments') or [])]:
+                    paid_names.append(m_obj.full_name)
+                else:
+                    removed_names.append(m_obj.full_name)
+        if paid_names:
+            broadcast_notification(
+                title='✅ تسديد حصة دية',
+                body=f"تم تسديد حصة دية '{diyah.title}' لـ: {', '.join(paid_names)}",
+                notif_type='diyah',
+                entity_id=diyah_id
+            )
+        if removed_names:
+            broadcast_notification(
+                title='❌ إلغاء تسديد',
+                body=f"تم إلغاء تسديد حصة دية '{diyah.title}' لـ: {', '.join(removed_names)}",
+                notif_type='diyah',
+                entity_id=diyah_id
+            )
         db.session.commit()
         return jsonify({"message": "Payments updated successfully"})
     except Exception as e:

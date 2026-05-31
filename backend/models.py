@@ -131,14 +131,20 @@ class WalletTransaction(db.Model):
 
 class Notification(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False, default='إشعار')
     message = db.Column(db.Text, nullable=False)
+    type = db.Column(db.String(50), default='general')  # 'member', 'diyah', 'general'
+    entity_id = db.Column(db.Integer, nullable=True)    # ID of member or diyah for navigation
     target_user_id = db.Column(db.Integer, db.ForeignKey('member.id'), nullable=True) # If null, it's for everyone
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
         return {
             "id": self.id,
+            "title": self.title,
             "message": self.message,
+            "type": self.type,
+            "entity_id": self.entity_id,
             "target_user_id": self.target_user_id,
             "created_at": self.created_at.isoformat()
         }

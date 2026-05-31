@@ -53,6 +53,25 @@ def migrate():
     except sqlite3.OperationalError:
         print("'paid_from_old_diyah_fund' column already exists.")
 
+    # ── Notification table new columns ──────────────────────────────────────
+    try:
+        cursor.execute("ALTER TABLE notification ADD COLUMN title VARCHAR(200) NOT NULL DEFAULT 'إشعار'")
+        print("Added 'title' column to 'notification' table.")
+    except sqlite3.OperationalError:
+        print("'title' column already exists in 'notification'.")
+
+    try:
+        cursor.execute("ALTER TABLE notification ADD COLUMN type VARCHAR(50) DEFAULT 'general'")
+        print("Added 'type' column to 'notification' table.")
+    except sqlite3.OperationalError:
+        print("'type' column already exists in 'notification'.")
+
+    try:
+        cursor.execute("ALTER TABLE notification ADD COLUMN entity_id INTEGER")
+        print("Added 'entity_id' column to 'notification' table.")
+    except sqlite3.OperationalError:
+        print("'entity_id' column already exists in 'notification'.")
+
     conn.commit()
     conn.close()
     print("Migration complete.")
